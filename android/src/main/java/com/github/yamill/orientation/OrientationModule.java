@@ -8,6 +8,10 @@ import android.content.IntentFilter;
 import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.util.Log;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
 
 import com.facebook.common.logging.FLog;
 import com.facebook.react.bridge.Arguments;
@@ -16,6 +20,7 @@ import com.facebook.react.bridge.LifecycleEventListener;
 import com.facebook.react.bridge.ReactApplicationContext;
 import com.facebook.react.bridge.ReactContextBaseJavaModule;
 import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.bridge.ReactContext;
 import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.common.ReactConstants;
 import com.facebook.react.modules.core.DeviceEventManagerModule;
@@ -25,12 +30,28 @@ import java.util.Map;
 
 import javax.annotation.Nullable;
 
-public class OrientationModule extends ReactContextBaseJavaModule implements LifecycleEventListener{
+public class OrientationModule extends ReactContextBaseJavaModule implements LifecycleEventListener, SensorEventListener {
+    private SensorManager sensorManager;
+    private Sensor sensor;
+    public static final int PORTRAIT = 1;
+    public static final int LANDSCAPE_RIGHT = 2;
+    public static final int UPSIDE_DOWN = 3;
+    public static final int LANDSCAPE_LEFT = 4;
+    public int mOrientationDeg; //last rotation in degrees
+    public int mOrientationRounded; //last orientation int from above
+    private static final int _DATA_X = 0;
+    private static final int _DATA_Y = 1;
+    private static final int _DATA_Z = 2;
+    private int ORIENTATION_UNKNOWN = -1;
+    private int tempOrientRounded = 0;
+
     final BroadcastReceiver receiver;
+    private ReactApplicationContext context;
 
     public OrientationModule(ReactApplicationContext reactContext) {
         super(reactContext);
         final ReactApplicationContext ctx = reactContext;
+        context = ctx;
 
         receiver = new BroadcastReceiver() {
             @Override
@@ -44,12 +65,14 @@ public class OrientationModule extends ReactContextBaseJavaModule implements Lif
                 params.putString("orientation", orientationValue);
                 if (ctx.hasActiveCatalystInstance()) {
                     ctx
-                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
-                    .emit("orientationDidChange", params);
+                            .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                            .emit("orientationDidChange", params);
                 }
             }
         };
         ctx.addLifecycleEventListener(this);
+        sensorManager = (SensorManager) ctx.getSystemService(ctx.SENSOR_SERVICE);
+        sensor = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER);
     }
 
     @Override
@@ -67,6 +90,84 @@ public class OrientationModule extends ReactContextBaseJavaModule implements Lif
             callback.invoke(orientationInt, null);
         } else {
             callback.invoke(null, orientation);
+        }
+    }
+
+    @Override
+    public void onSensorChanged(SensorEvent sensorEvent) {
+
+        float[] values = sensorEvent.values;
+        int orientation = ORIENTATION_UNKNOWN;
+        float X = -values[_DATA_X];
+        float Y = -values[_DATA_Y];
+        float Z = -values[_DATA_Z];
+        float magnitude = X * X + Y * Y;
+
+        if (magnitude * 4 >= Z * Z) {
+            float OneEightyOverPi = 57.29577957855f;
+            float angle = (float) Math.atan2(-Y, X) * OneEightyOverPi;
+            orientation = 90 - (int) Math.round(angle);
+            // normalize to 0 - 359 range
+            while (orientation >= 360) {
+                orientation -= 360;
+            }
+            while (orientation < 0) {
+                orientation += 360;
+            }
+        }
+
+        if (orientation != mOrientationDeg) {
+            mOrientationDeg = orientation;
+            if (orientation == -1) {//basically flat
+
+            } else if (orientation < 10 || orientation > 350) {
+                tempOrientRounded = 1;//portrait
+            } else if (orientation > 80 && orientation < 100) {
+                tempOrientRounded = 2; //lsRight
+            } else if (orientation > 170 && orientation < 190) {
+                tempOrientRounded = 3; //upside down
+            } else if (orientation > 260 && orientation < 280) {
+                tempOrientRounded = 4;//lsLeft
+            }
+
+        }
+        if (mOrientationRounded != tempOrientRounded) {
+            mOrientationRounded = tempOrientRounded;
+            WritableMap map = Arguments.createMap();
+            switch (mOrientationRounded) {
+                case PORTRAIT:
+                    map.putString("specificOrientation", "PORTRAIT");
+                    sendSpecificOrientationEvent(context, "sensorOrientationChangeEvent", map);
+                    break;
+                case LANDSCAPE_LEFT:
+                    map.putString("specificOrientation", "LANDSCAPE_LEFT");
+                    sendSpecificOrientationEvent(context, "sensorOrientationChangeEvent", map);
+                    break;
+                case UPSIDE_DOWN:
+                    map.putString("specificOrientation", "UPSIDE_DOWN");
+                    sendSpecificOrientationEvent(context, "sensorOrientationChangeEvent", map);
+                    break;
+                case LANDSCAPE_RIGHT:
+                    map.putString("specificOrientation", "LANDSCAPE_RIGHT");
+                    sendSpecificOrientationEvent(context, "sensorOrientationChangeEvent", map);
+                    break;
+            }
+        }
+    }
+
+
+    @Override
+    public void onAccuracyChanged(Sensor sensor, int i) {
+
+    }
+
+    public void sendSpecificOrientationEvent(ReactContext ctx,
+                                             String eventName,
+                                             @Nullable WritableMap params) {
+        if (ctx.hasActiveCatalystInstance()) {
+            ctx
+                    .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
+                    .emit("specificOrientationDidChange", params);
         }
     }
 
@@ -116,7 +217,8 @@ public class OrientationModule extends ReactContextBaseJavaModule implements Lif
     }
 
     @Override
-    public @Nullable Map<String, Object> getConstants() {
+    public @Nullable
+    Map<String, Object> getConstants() {
         HashMap<String, Object> constants = new HashMap<String, Object>();
         int orientationInt = getReactApplicationContext().getResources().getConfiguration().orientation;
 
@@ -151,16 +253,17 @@ public class OrientationModule extends ReactContextBaseJavaModule implements Lif
             return;
         }
         activity.registerReceiver(receiver, new IntentFilter("onConfigurationChanged"));
+        sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_NORMAL);
     }
+
     @Override
     public void onHostPause() {
         final Activity activity = getCurrentActivity();
         if (activity == null) return;
-        try
-        {
+        try {
             activity.unregisterReceiver(receiver);
-        }
-        catch (java.lang.IllegalArgumentException e) {
+            sensorManager.unregisterListener(this);
+        } catch (java.lang.IllegalArgumentException e) {
             FLog.e(ReactConstants.TAG, "receiver already unregistered", e);
         }
     }
@@ -168,5 +271,5 @@ public class OrientationModule extends ReactContextBaseJavaModule implements Lif
     @Override
     public void onHostDestroy() {
 
-        }
     }
+}
